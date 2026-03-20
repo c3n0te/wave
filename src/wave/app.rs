@@ -1,21 +1,24 @@
 use crossterm::event::{KeyCode, KeyEventKind};
+use ratatui::symbols::Marker;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
-    style::Stylize,
+    style::{Color, Stylize},
     text::Line,
-    widgets::{Axis, Block, Borders, Chart, Dataset},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
 };
 use std::sync::mpsc;
 
 pub enum Event {
     Input(crossterm::event::KeyEvent),
+    Audio(Vec<f32>),
 }
 
 #[derive(Debug)]
 pub struct WaveApp {
     exit: bool,
     db: rusqlite::Connection,
+    data: Vec<f32>,
 }
 
 impl WaveApp {
@@ -24,6 +27,7 @@ impl WaveApp {
         Ok(Self {
             exit: false,
             db: db,
+            data: vec![],
         })
     }
 
@@ -35,36 +39,53 @@ impl WaveApp {
 
         let instructions = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold()]).centered();
         let x_axis = Axis::default()
-            .title("time".blue())
+            .title("time".yellow())
             .bounds([0.0, 10.0])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
-            .title("Amplitude".blue())
-            .bounds([0.0, 10.0])
+            .title("Amplitude".yellow())
+            .bounds([0.0, 1.0])
             .labels(["0", "5", "10"]);
 
-        let time = Chart::new(vec![Dataset::default()])
+        let data = self
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| (i as f64, y as f64))
+            .collect::<Vec<_>>();
+
+        let dataset = Dataset::default()
+            .name("Amplitude")
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Color::Blue)
+            .data(&data);
+
+        let time = Chart::new(vec![dataset])
             .x_axis(x_axis)
             .y_axis(y_axis)
             .block(Block::default().title("Waveform").borders(Borders::ALL));
 
         let x_axis = Axis::default()
-            .title("Frequency (Hz)".blue())
+            .title("Frequency (Hz)".yellow())
             .bounds([0.0, 10.0])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
-            .title("Amplitude (dB)".blue())
+            .title("Amplitude (dB)".yellow())
             .bounds([0.0, 10.0])
             .labels(["0", "5", "10"]);
 
-        let freq = Chart::new(vec![]).x_axis(x_axis).y_axis(y_axis).block(
-            Block::default()
-                .title("FFT Spectrum (dB)")
-                .title_bottom(instructions)
-                .borders(Borders::ALL),
-        );
+        let freq = Chart::new(vec![Dataset::default()])
+            .x_axis(x_axis)
+            .y_axis(y_axis)
+            .block(
+                Block::default()
+                    .title("FFT Spectrum (dB)")
+                    .title_bottom(instructions)
+                    .borders(Borders::ALL),
+            );
 
         frame.render_widget(time, chunks[0]);
         frame.render_widget(freq, chunks[1]);
@@ -79,11 +100,17 @@ impl WaveApp {
             let event = rx.recv()?;
             match event {
                 Event::Input(key_event) => self.handle_key_event(key_event)?,
+                Event::Audio(data) => self.handle_audio_event(data)?,
             }
 
             terminal.draw(|frame| self.draw(frame))?;
         }
 
+        Ok(())
+    }
+
+    fn handle_audio_event(&mut self, data: Vec<f32>) -> Result<(), anyhow::Error> {
+        self.data = data;
         Ok(())
     }
 

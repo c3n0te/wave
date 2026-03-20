@@ -1,5 +1,11 @@
 use crate::Event;
+use anyhow::anyhow;
+use cpal::Sample;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub fn handle_input(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
     loop {
@@ -8,4 +14,65 @@ pub fn handle_input(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
             _ => {}
         }
     }
+}
+
+pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
+    let host = cpal::default_host();
+    let Some(device) = host.default_input_device() else {
+        return Err(anyhow!("Failed to unwrap default input device"));
+    };
+
+    let config = device.default_input_config()?;
+    let recorded_samples_f32 = Arc::new(Mutex::new(vec![]));
+    let recorded_samples_f32_copy = Arc::clone(&recorded_samples_f32);
+    let recorded_samples_i16 = Arc::new(Mutex::new(vec![]));
+    let recorded_samples_u16 = Arc::new(Mutex::new(vec![]));
+
+    let err_fn = |err| log::error!("An error occurred on the input audio stream: {:?}", err);
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => {
+            build_input_stream::<f32>(&device, &config.into(), recorded_samples_f32, err_fn)?
+        }
+        cpal::SampleFormat::I16 => {
+            build_input_stream::<i16>(&device, &config.into(), recorded_samples_i16, err_fn)?
+        }
+        cpal::SampleFormat::U16 => {
+            build_input_stream::<u16>(&device, &config.into(), recorded_samples_u16, err_fn)?
+        }
+        sample_format => panic!("Unsupported sample format: {:?}", sample_format),
+    };
+
+    stream.play()?;
+    thread::sleep(Duration::from_secs(3));
+    let Ok(samples) = recorded_samples_f32_copy.lock() else {
+        return Err(anyhow!("Failed to acquire recorded samples lock"));
+    };
+
+    tx.send(Event::Audio(samples.to_vec()))?;
+    Ok(())
+}
+
+fn build_input_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    recorded_samples: Arc<Mutex<Vec<T>>>,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> anyhow::Result<cpal::Stream, anyhow::Error>
+where
+    T: Sync + Send + Sample + cpal::FromSample<f32> + cpal::SizedSample + 'static,
+{
+    let stream = device.build_input_stream(
+        config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| match recorded_samples.lock() {
+            Ok(mut samples) => samples.extend_from_slice(data),
+            Err(e) => {
+                log::error!("Failed to acquire samples lock: {:?}", e);
+                return;
+            }
+        },
+        err_fn,
+        None,
+    )?;
+    Ok(stream)
 }
