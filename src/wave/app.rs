@@ -7,6 +7,7 @@ use ratatui::{
     text::Line,
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
 };
+use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::mpsc;
 
 pub enum Event {
@@ -38,57 +39,85 @@ impl WaveApp {
             .split(frame.area());
 
         let instructions = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold()]).centered();
+        let time_data = self.time_series();
         let x_axis = Axis::default()
             .title("time".yellow())
-            .bounds([0.0, 10.0])
+            .bounds([0.0, time_data.len() as f64])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
             .title("Amplitude".yellow())
-            .bounds([0.0, 1.0])
-            .labels(["0", "5", "10"]);
+            .bounds([-0.5, 0.5])
+            .labels(["-0.5", "0.0", "0.5"]);
 
-        let data = self
-            .data
-            .iter()
-            .enumerate()
-            .map(|(i, &y)| (i as f64, y as f64))
-            .collect::<Vec<_>>();
-
-        let dataset = Dataset::default()
+        let time_dataset = Dataset::default()
             .name("Amplitude")
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Color::Blue)
-            .data(&data);
+            .style(Color::Green)
+            .data(&time_data);
 
-        let time = Chart::new(vec![dataset])
+        let time = Chart::new(vec![time_dataset])
             .x_axis(x_axis)
             .y_axis(y_axis)
             .block(Block::default().title("Waveform").borders(Borders::ALL));
 
+        let freq_data = self.fft_series();
         let x_axis = Axis::default()
             .title("Frequency (Hz)".yellow())
-            .bounds([0.0, 10.0])
+            .bounds([0.0, freq_data.len() as f64])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
-            .title("Amplitude (dB)".yellow())
-            .bounds([0.0, 10.0])
-            .labels(["0", "5", "10"]);
+            .title("Magnitude".yellow())
+            .bounds([-10.0, 10.0])
+            .labels(["-10.0", "0", "10.0"]);
 
-        let freq = Chart::new(vec![Dataset::default()])
+        let freq_dataset = Dataset::default()
+            .name("Amplitude")
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Color::Green)
+            .data(&freq_data);
+
+        let freq = Chart::new(vec![freq_dataset])
             .x_axis(x_axis)
             .y_axis(y_axis)
             .block(
                 Block::default()
-                    .title("FFT Spectrum (dB)")
+                    .title("FFT Spectrum")
                     .title_bottom(instructions)
                     .borders(Borders::ALL),
             );
 
         frame.render_widget(time, chunks[0]);
         frame.render_widget(freq, chunks[1]);
+    }
+
+    fn time_series(&self) -> Vec<(f64, f64)> {
+        self.data
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| (i as f64, y as f64))
+            .collect::<Vec<_>>()
+    }
+
+    fn fft_series(&self) -> Vec<(f64, f64)> {
+        let samples = self.data.len();
+        let mut buffer: Vec<Complex<f32>> = self
+            .data
+            .iter()
+            .map(|&x| Complex::new(x as f32, 0.0))
+            .collect();
+
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(samples);
+        fft.process(&mut buffer);
+        buffer
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| (i as f64, y.re as f64))
+            .collect()
     }
 
     pub fn run(

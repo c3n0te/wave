@@ -27,8 +27,7 @@ pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
     let recorded_samples_f32_copy = Arc::clone(&recorded_samples_f32);
     let recorded_samples_i16 = Arc::new(Mutex::new(vec![]));
     let recorded_samples_u16 = Arc::new(Mutex::new(vec![]));
-
-    let err_fn = |err| log::error!("An error occurred on the input audio stream: {:?}", err);
+    let err_fn = |err| tracing::error!("An error occurred on the input audio stream: {:?}", err);
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
@@ -43,14 +42,16 @@ pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
         sample_format => panic!("Unsupported sample format: {:?}", sample_format),
     };
 
-    stream.play()?;
-    thread::sleep(Duration::from_secs(3));
-    let Ok(samples) = recorded_samples_f32_copy.lock() else {
-        return Err(anyhow!("Failed to acquire recorded samples lock"));
-    };
+    loop {
+        stream.play()?;
+        thread::sleep(Duration::from_millis(15));
+        let Ok(mut samples) = recorded_samples_f32_copy.lock() else {
+            return Err(anyhow!("Failed to acquire recorded samples lock"));
+        };
 
-    tx.send(Event::Audio(samples.to_vec()))?;
-    Ok(())
+        tx.send(Event::Audio(samples.to_vec()))?;
+        samples.clear();
+    }
 }
 
 fn build_input_stream<T>(
@@ -58,7 +59,7 @@ fn build_input_stream<T>(
     config: &cpal::StreamConfig,
     recorded_samples: Arc<Mutex<Vec<T>>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
-) -> anyhow::Result<cpal::Stream, anyhow::Error>
+) -> Result<cpal::Stream, anyhow::Error>
 where
     T: Sync + Send + Sample + cpal::FromSample<f32> + cpal::SizedSample + 'static,
 {
@@ -67,12 +68,13 @@ where
         move |data: &[T], _: &cpal::InputCallbackInfo| match recorded_samples.lock() {
             Ok(mut samples) => samples.extend_from_slice(data),
             Err(e) => {
-                log::error!("Failed to acquire samples lock: {:?}", e);
+                tracing::error!("Failed to acquire samples lock: {:?}", e);
                 return;
             }
         },
         err_fn,
         None,
     )?;
+
     Ok(stream)
 }
