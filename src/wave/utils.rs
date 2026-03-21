@@ -23,10 +23,13 @@ pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
     };
 
     let config = device.default_input_config()?;
+    let config_clone = config.clone();
     let recorded_samples_f32 = Arc::new(Mutex::new(vec![]));
-    let recorded_samples_f32_copy = Arc::clone(&recorded_samples_f32);
     let recorded_samples_i16 = Arc::new(Mutex::new(vec![]));
     let recorded_samples_u16 = Arc::new(Mutex::new(vec![]));
+    let recorded_samples_f32_clone = Arc::clone(&recorded_samples_f32);
+    let recorded_samples_i16_clone = Arc::clone(&recorded_samples_i16);
+    let recorded_samples_u16_clone = Arc::clone(&recorded_samples_u16);
     let err_fn = |err| tracing::error!("An error occurred on the input audio stream: {:?}", err);
 
     let stream = match config.sample_format() {
@@ -45,12 +48,35 @@ pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
     loop {
         stream.play()?;
         thread::sleep(Duration::from_millis(15));
-        let Ok(mut samples) = recorded_samples_f32_copy.lock() else {
-            return Err(anyhow!("Failed to acquire recorded samples lock"));
-        };
+        match config_clone.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let Ok(mut samples) = recorded_samples_f32_clone.lock() else {
+                    return Err(anyhow!("Failed to acquire recorded samples lock"));
+                };
 
-        tx.send(Event::Audio(samples.to_vec()))?;
-        samples.clear();
+                tx.send(Event::Audio(samples.to_vec()))?;
+                samples.clear();
+            }
+            cpal::SampleFormat::I16 => {
+                let Ok(mut samples) = recorded_samples_i16_clone.lock() else {
+                    return Err(anyhow!("Failed to acquire recorded samples lock"));
+                };
+
+                let converted_data = samples.iter().map(|&x| x as f32).collect::<Vec<_>>();
+                tx.send(Event::Audio(converted_data))?;
+                samples.clear();
+            }
+            cpal::SampleFormat::U16 => {
+                let Ok(mut samples) = recorded_samples_u16_clone.lock() else {
+                    return Err(anyhow!("Failed to acquire recorded samples lock"));
+                };
+
+                let converted_data = samples.iter().map(|&x| x as f32).collect::<Vec<_>>();
+                tx.send(Event::Audio(converted_data))?;
+                samples.clear();
+            }
+            sample_format => tracing::error!("Unsupported sample format: {:?}", sample_format),
+        }
     }
 }
 

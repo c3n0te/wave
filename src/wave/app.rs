@@ -70,8 +70,8 @@ impl WaveApp {
 
         let y_axis = Axis::default()
             .title("Magnitude".yellow())
-            .bounds([-10.0, 10.0])
-            .labels(["-10.0", "0", "10.0"]);
+            .bounds([-5.0, 5.0])
+            .labels(["-5.0", "0", "5.0"]);
 
         let freq_dataset = Dataset::default()
             .name("Amplitude")
