@@ -65,7 +65,7 @@ impl WaveApp {
         let freq_data = self.fft_series();
         let x_axis = Axis::default()
             .title("Frequency (Hz)".yellow())
-            .bounds([0.0, freq_data.len() as f64])
+            .bounds([0.0, freq_data.len() as f64 / 2.0])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
