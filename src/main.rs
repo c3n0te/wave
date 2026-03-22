@@ -23,7 +23,7 @@ fn main() -> Result<(), anyhow::Error> {
     });
 
     thread::spawn(move || {
-        let Ok(_) = get_audio(event_tx) else {
+        let Ok(_) = get_audio(event_tx, 15) else {
             return Err(anyhow!("Failed to read audio input event"));
         };
 

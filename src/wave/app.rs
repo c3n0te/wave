@@ -19,7 +19,9 @@ pub enum Event {
 pub struct WaveApp {
     exit: bool,
     db: rusqlite::Connection,
-    data: Vec<f32>,
+    raw_data: Vec<f32>,
+    record: bool,
+    recorded_data: Vec<f32>,
 }
 
 impl WaveApp {
@@ -28,7 +30,9 @@ impl WaveApp {
         Ok(Self {
             exit: false,
             db: db,
-            data: vec![],
+            raw_data: vec![],
+            record: false,
+            recorded_data: vec![],
         })
     }
 
@@ -38,7 +42,16 @@ impl WaveApp {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(frame.area());
 
-        let instructions = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold()]).centered();
+        let instructions = Line::from(vec![
+            " Record ".into(),
+            "<R>".blue().bold(),
+            " Clear Recorded Data ".into(),
+            "<C>".blue().bold(),
+            " Quit ".into(),
+            "<Q> ".blue().bold(),
+        ])
+        .centered();
+
         let time_data = self.time_series();
         let x_axis = Axis::default()
             .title("time".yellow())
@@ -51,7 +64,6 @@ impl WaveApp {
             .labels(["-0.5", "0.0", "0.5"]);
 
         let time_dataset = Dataset::default()
-            .name("Amplitude")
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Color::Green)
@@ -70,11 +82,10 @@ impl WaveApp {
 
         let y_axis = Axis::default()
             .title("Magnitude".yellow())
-            .bounds([-5.0, 5.0])
-            .labels(["-5.0", "0", "5.0"]);
+            .bounds([0.0, 10.0])
+            .labels(["0", "5.0", "10.0"]);
 
         let freq_dataset = Dataset::default()
-            .name("Amplitude")
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Color::Green)
@@ -95,7 +106,7 @@ impl WaveApp {
     }
 
     fn time_series(&self) -> Vec<(f64, f64)> {
-        self.data
+        self.raw_data
             .iter()
             .enumerate()
             .map(|(i, &y)| (i as f64, y as f64))
@@ -103,9 +114,9 @@ impl WaveApp {
     }
 
     fn fft_series(&self) -> Vec<(f64, f64)> {
-        let samples = self.data.len();
+        let samples = self.raw_data.len();
         let mut buffer: Vec<Complex<f32>> = self
-            .data
+            .raw_data
             .iter()
             .map(|&x| Complex::new(x as f32, 0.0))
             .collect();
@@ -116,8 +127,16 @@ impl WaveApp {
         buffer
             .iter()
             .enumerate()
-            .map(|(i, &y)| (i as f64, y.re as f64))
+            .map(|(i, &y)| (i as f64, y.re.abs() as f64))
             .collect()
+    }
+
+    fn record_data(&mut self) {
+        self.recorded_data.extend(self.raw_data.clone());
+    }
+
+    fn clear_recorded(&mut self) {
+        self.recorded_data.clear();
     }
 
     pub fn run(
@@ -133,13 +152,17 @@ impl WaveApp {
             }
 
             terminal.draw(|frame| self.draw(frame))?;
+
+            if self.record {
+                self.record_data();
+            }
         }
 
         Ok(())
     }
 
     fn handle_audio_event(&mut self, data: Vec<f32>) -> Result<(), anyhow::Error> {
-        self.data = data;
+        self.raw_data = data;
         Ok(())
     }
 
@@ -149,6 +172,22 @@ impl WaveApp {
     ) -> Result<(), anyhow::Error> {
         if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('q') {
             self.exit = true;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && key_event.code == KeyCode::Char('r')
+            && !self.record
+        {
+            self.record = true;
+        } else if key_event.kind == KeyEventKind::Press
+            && key_event.code == KeyCode::Char('r')
+            && self.record
+        {
+            self.record = false;
+        }
+
+        if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('c') {
+            self.clear_recorded();
         }
 
         Ok(())

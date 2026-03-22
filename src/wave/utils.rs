@@ -16,7 +16,7 @@ pub fn handle_input(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
     }
 }
 
-pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
+pub fn get_audio(tx: mpsc::Sender<Event>, period_ms: u64) -> Result<(), anyhow::Error> {
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
         return Err(anyhow!("Failed to unwrap default input device"));
@@ -47,7 +47,7 @@ pub fn get_audio(tx: mpsc::Sender<Event>) -> Result<(), anyhow::Error> {
 
     loop {
         stream.play()?;
-        thread::sleep(Duration::from_millis(15));
+        thread::sleep(Duration::from_millis(period_ms));
         match config_clone.sample_format() {
             cpal::SampleFormat::F32 => {
                 let Ok(mut samples) = recorded_samples_f32_clone.lock() else {
