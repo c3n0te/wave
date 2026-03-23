@@ -8,7 +8,7 @@ mod wave;
 
 fn main() -> Result<(), anyhow::Error> {
     initialize_logging()?;
-    let mut wave = WaveApp::new("wave.db")?;
+    let mut wave = WaveApp::new("wave.db", 16000.0)?;
     let mut terminal = ratatui::init();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     let tx_clone = event_tx.clone();

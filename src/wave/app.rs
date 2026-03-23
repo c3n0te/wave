@@ -1,4 +1,11 @@
+use anyhow::anyhow;
+use cpal::SupportedStreamConfig;
 use crossterm::event::{KeyCode, KeyEventKind};
+use dasp::ring_buffer;
+use dasp_interpolate::sinc::Sinc;
+use dasp_signal::Signal;
+use fundsp::prelude::*;
+use non_empty_slice::non_empty_vec;
 use ratatui::symbols::Marker;
 use ratatui::{
     DefaultTerminal, Frame,
@@ -8,31 +15,37 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
 };
 use rustfft::{FftPlanner, num_complex::Complex};
+use spectrograms::{LinearHz, Power, Spectrogram, audio::*, nzu};
 use std::sync::mpsc;
 
 pub enum Event {
     Input(crossterm::event::KeyEvent),
     Audio(Vec<f32>),
+    Config(SupportedStreamConfig),
 }
 
 #[derive(Debug)]
 pub struct WaveApp {
     exit: bool,
+    config: Option<SupportedStreamConfig>,
     db: rusqlite::Connection,
     raw_data: Vec<f32>,
     record: bool,
     recorded_data: Vec<f32>,
+    downsample_rate: f64,
 }
 
 impl WaveApp {
-    pub fn new(path: &str) -> Result<WaveApp, anyhow::Error> {
+    pub fn new(path: &str, downsample_rate: f64) -> Result<WaveApp, anyhow::Error> {
         let db = rusqlite::Connection::open(path)?;
         Ok(Self {
             exit: false,
+            config: None,
             db: db,
             raw_data: vec![],
             record: false,
             recorded_data: vec![],
+            downsample_rate: downsample_rate,
         })
     }
 
@@ -47,6 +60,8 @@ impl WaveApp {
             "<R>".blue().bold(),
             " Clear Recorded Data ".into(),
             "<C>".blue().bold(),
+            " Search ".into(),
+            "<S>".blue().bold(),
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ])
@@ -139,6 +154,51 @@ impl WaveApp {
         self.recorded_data.clear();
     }
 
+    fn downsample(&self) -> Result<Vec<f32>, anyhow::Error> {
+        let Some(cfg) = self.config.clone() else {
+            return Err(anyhow!("Failed to unwrap cpal device config"));
+        };
+
+        let source = dasp_signal::from_iter(self.recorded_data.iter().map(|&x| x as f64));
+        let scale = self.downsample_rate / cfg.sample_rate() as f64;
+        let rbuf = ring_buffer::Fixed::from(vec![0.0; 70]);
+        let sinc = Sinc::new(rbuf);
+        let num_samples = (scale * self.recorded_data.len() as f64).round() as usize;
+        let signal = source
+            .scale_hz(sinc, scale)
+            .take(num_samples)
+            .map(|x| x as f32)
+            .collect::<Vec<_>>();
+        Ok(signal)
+    }
+
+    fn bandpass(&self, signal: &mut Vec<f32>, low_cutoff: f64, high_cutoff: f64, q_factor: f64) {
+        let mut filter = highpass_hz(low_cutoff, q_factor) >> lowpass_hz(high_cutoff, q_factor);
+        filter.set_sample_rate(self.downsample_rate);
+        signal
+            .iter_mut()
+            .for_each(|sample| *sample = filter.filter_mono(*sample));
+    }
+
+    fn spectrogram(&self, signal: Vec<f32>) -> Result<Spectrogram<LinearHz, Power>, anyhow::Error> {
+        let mut samples = non_empty_vec![0.0; nzu!(1)];
+        for sample in signal {
+            samples.push(sample as f64);
+        }
+
+        let stft = StftParams::new(nzu!(512), nzu!(256), WindowType::Hanning, true)?;
+        let params = SpectrogramParams::new(stft, self.downsample_rate)?;
+        let spec = LinearPowerSpectrogram::compute(&samples, &params, None)?;
+        Ok(spec)
+    }
+
+    fn search(&self) -> Result<(), anyhow::Error> {
+        let mut signal = self.downsample()?;
+        self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
+        let spec = self.spectrogram(signal)?;
+        Ok(())
+    }
+
     pub fn run(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -149,6 +209,7 @@ impl WaveApp {
             match event {
                 Event::Input(key_event) => self.handle_key_event(key_event)?,
                 Event::Audio(data) => self.handle_audio_event(data)?,
+                Event::Config(config) => self.handle_config_event(config)?,
             }
 
             terminal.draw(|frame| self.draw(frame))?;
@@ -158,6 +219,11 @@ impl WaveApp {
             }
         }
 
+        Ok(())
+    }
+
+    fn handle_config_event(&mut self, config: SupportedStreamConfig) -> Result<(), anyhow::Error> {
+        self.config = Some(config);
         Ok(())
     }
 
@@ -188,6 +254,10 @@ impl WaveApp {
 
         if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('c') {
             self.clear_recorded();
+        }
+
+        if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('s') {
+            self.search()?;
         }
 
         Ok(())

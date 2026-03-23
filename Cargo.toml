@@ -8,11 +8,17 @@ anyhow = "1.0.102"
 color-eyre = "0.6.5"
 cpal = "0.17.3"
 crossterm = "0.29.0"
+dasp = { version = "0.11.0", features = ["ring_buffer"] }
+dasp_interpolate = { version = "0.11.0", features = ["sinc"] }
+dasp_signal = "0.11.0"
 directories = "6.0.0"
+fundsp = "0.23.0"
 lazy_static = "1.5.0"
+non-empty-slice = "0.5.1"
 ratatui = "0.30.0"
 rusqlite = "0.39.0"
 rustfft = "6.4.1"
+spectrograms = { version = "1.1.0", default-features = false, features = ["realfft"] }
 tracing = "0.1.44"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

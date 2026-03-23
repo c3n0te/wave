@@ -23,7 +23,8 @@ pub fn get_audio(tx: mpsc::Sender<Event>, period_ms: u64) -> Result<(), anyhow::
     };
 
     let config = device.default_input_config()?;
-    let config_clone = config.clone();
+    let config_clone1 = config.clone();
+    let config_clone2 = config.clone();
     let recorded_samples_f32 = Arc::new(Mutex::new(vec![]));
     let recorded_samples_i16 = Arc::new(Mutex::new(vec![]));
     let recorded_samples_u16 = Arc::new(Mutex::new(vec![]));
@@ -31,6 +32,8 @@ pub fn get_audio(tx: mpsc::Sender<Event>, period_ms: u64) -> Result<(), anyhow::
     let recorded_samples_i16_clone = Arc::clone(&recorded_samples_i16);
     let recorded_samples_u16_clone = Arc::clone(&recorded_samples_u16);
     let err_fn = |err| tracing::error!("An error occurred on the input audio stream: {:?}", err);
+    tx.send(Event::Config(config_clone1))?;
+    tracing::info!("CPAL Config: {:?}", config);
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
@@ -48,7 +51,7 @@ pub fn get_audio(tx: mpsc::Sender<Event>, period_ms: u64) -> Result<(), anyhow::
     loop {
         stream.play()?;
         thread::sleep(Duration::from_millis(period_ms));
-        match config_clone.sample_format() {
+        match config_clone2.sample_format() {
             cpal::SampleFormat::F32 => {
                 let Ok(mut samples) = recorded_samples_f32_clone.lock() else {
                     return Err(anyhow!("Failed to acquire recorded samples f32 lock"));
