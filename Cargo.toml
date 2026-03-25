@@ -16,7 +16,7 @@ fundsp = "0.23.0"
 lazy_static = "1.5.0"
 non-empty-slice = "0.5.1"
 ratatui = "0.30.0"
-rusqlite = "0.39.0"
+rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 rustfft = "6.4.1"
 spectrograms = { version = "1.1.0", default-features = false, features = ["realfft"] }
 tracing = "0.1.44"
