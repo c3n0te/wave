@@ -68,9 +68,10 @@ impl WaveApp {
         .centered();
 
         let time_data = self.time_series();
+        let time_data_len = time_data.len();
         let x_axis = Axis::default()
             .title("time".yellow())
-            .bounds([0.0, time_data.len() as f64])
+            .bounds([0.0, time_data_len as f64])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
@@ -90,9 +91,10 @@ impl WaveApp {
             .block(Block::default().title("Waveform").borders(Borders::ALL));
 
         let freq_data = self.fft_series();
+        let freq_data_len = freq_data.len();
         let x_axis = Axis::default()
             .title("Frequency (Hz)".yellow())
-            .bounds([0.0, freq_data.len() as f64 / 2.0])
+            .bounds([0.0, freq_data_len as f64 / 2.0])
             .labels(["0%", "50%", "100%"]);
 
         let y_axis = Axis::default()
@@ -156,6 +158,7 @@ impl WaveApp {
 
     fn downsample(&self) -> Result<Vec<f32>, anyhow::Error> {
         let Some(cfg) = self.config.clone() else {
+            tracing::error!("Failed to unwrap cpal device config");
             return Err(anyhow!("Failed to unwrap cpal device config"));
         };
 
@@ -192,10 +195,29 @@ impl WaveApp {
         Ok(spec)
     }
 
+    fn extract_peaks(&self, spec: &Spectrogram<LinearHz, Power>) -> Result<(), anyhow::Error> {
+        tracing::info!("axes: {:?}", spec.axes());
+        tracing::info!("bins: {:?}", spec.n_bins());
+        tracing::info!("frames: {:?}", spec.n_frames());
+        tracing::info!("db range: {:?}", spec.db_range());
+
+        let freq_bins = vec![(0, 10), (10, 20), (20, 40), (40, 80), (80, 160), (160, 512)];
+        for col in spec.data().axis_iter(ndarray::Axis(1)) {
+            //tracing::info!("column:\n{:?}", col);
+            for val in col {
+                //tracing::info!("val: {:?}", val);
+            }
+        }
+
+        Ok(())
+    }
+
     fn search(&self) -> Result<(), anyhow::Error> {
         let mut signal = self.downsample()?;
         self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
         let spec = self.spectrogram(signal)?;
+        tracing::info!("spectrogram shape: {:?}", spec.data().dim());
+        let peaks = self.extract_peaks(&spec);
         Ok(())
     }
 
