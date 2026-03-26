@@ -16,6 +16,7 @@ use ratatui::{
 };
 use rustfft::{FftPlanner, num_complex::Complex};
 use spectrograms::{LinearHz, Power, Spectrogram, audio::*, nzu};
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 pub enum Event {
@@ -195,29 +196,48 @@ impl WaveApp {
         Ok(spec)
     }
 
-    fn extract_peaks(&self, spec: &Spectrogram<LinearHz, Power>) -> Result<(), anyhow::Error> {
+    fn extract_peaks(
+        &self,
+        spec: &Spectrogram<LinearHz, Power>,
+    ) -> Result<Vec<f32>, anyhow::Error> {
+        tracing::info!("spectrogram shape: {:?}", spec.data().dim());
         tracing::info!("axes: {:?}", spec.axes());
         tracing::info!("bins: {:?}", spec.n_bins());
         tracing::info!("frames: {:?}", spec.n_frames());
+        tracing::info!("freq range: {:?}", spec.frequency_range());
         tracing::info!("db range: {:?}", spec.db_range());
+        tracing::info!("duration (s): {:?}", spec.duration());
 
-        let freq_bins = vec![(0, 10), (10, 20), (20, 40), (40, 80), (80, 160), (160, 512)];
+        let freq_bins = spec
+            .frequencies()
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (i, x))
+            .collect::<HashMap<_, _>>();
+
         for col in spec.data().axis_iter(ndarray::Axis(1)) {
-            //tracing::info!("column:\n{:?}", col);
-            for val in col {
-                //tracing::info!("val: {:?}", val);
+            let mut max = 0.0;
+            for (idx, &val) in col.iter().enumerate() {
+                if val > max {
+                    max = val;
+                    tracing::info!(
+                        "freq: {:?}; val: {:?}",
+                        freq_bins.get(&idx).unwrap_or(&&0.0),
+                        max
+                    );
+                }
             }
+            tracing::info!("max: {:?}\n", max);
         }
 
-        Ok(())
+        Ok(vec![])
     }
 
     fn search(&self) -> Result<(), anyhow::Error> {
         let mut signal = self.downsample()?;
         self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
-        let spec = self.spectrogram(signal)?;
-        tracing::info!("spectrogram shape: {:?}", spec.data().dim());
-        let peaks = self.extract_peaks(&spec);
+        let spectrogram = self.spectrogram(signal)?;
+        let peaks = self.extract_peaks(&spectrogram);
         Ok(())
     }
 
