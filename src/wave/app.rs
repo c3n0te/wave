@@ -26,7 +26,7 @@ pub enum Event {
     Config(SupportedStreamConfig),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 struct Peak {
     time: f64,
     frequency: f64,
@@ -261,9 +261,10 @@ impl WaveApp {
             let mut row_idx = 0;
             for (idx0, idxf) in &freq_bins {
                 let mut max = 0.0;
-                for &val in col.slice(s![*idx0..*idxf]) {
+                for (idx, &val) in col.slice(s![*idx0..*idxf]).iter().enumerate() {
                     if val > max {
                         max = val;
+                        row_idx = *idx0 + idx;
                     }
                 }
 
@@ -281,8 +282,6 @@ impl WaveApp {
                 } else {
                     max_values.insert((idx0, idxf), vec![pk]);
                 }
-
-                row_idx += 1;
             }
             col_idx += 1;
         }
