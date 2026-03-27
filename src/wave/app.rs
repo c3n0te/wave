@@ -256,7 +256,7 @@ impl WaveApp {
         let mut max_values: HashMap<(&usize, &usize), Vec<Peak>> =
             HashMap::with_capacity(freq_bins.len());
 
-        let mut col_idx = 0 as usize;
+        let mut col_idx = 0;
         for col in spec.data().axis_iter(ndarray::Axis(1)) {
             let mut row_idx = 0;
             for (idx0, idxf) in &freq_bins {
@@ -291,7 +291,7 @@ impl WaveApp {
             let sum = maxs.iter().map(|pk| pk.value).sum::<f64>();
             let maxs_len = maxs.len() as f64;
             let avg = sum / maxs_len;
-            maxs.retain(|x| x.value > avg);
+            maxs.retain(|pk| pk.value > avg);
             peaks.extend_from_slice(maxs);
         }
 
