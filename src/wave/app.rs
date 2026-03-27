@@ -5,6 +5,7 @@ use dasp::ring_buffer;
 use dasp_interpolate::sinc::Sinc;
 use dasp_signal::Signal;
 use fundsp::prelude::*;
+use ndarray::s;
 use non_empty_slice::non_empty_vec;
 use ratatui::symbols::Marker;
 use ratatui::{
@@ -23,6 +24,23 @@ pub enum Event {
     Input(crossterm::event::KeyEvent),
     Audio(Vec<f32>),
     Config(SupportedStreamConfig),
+}
+
+#[derive(Debug, Clone)]
+struct Peak {
+    time: f64,
+    frequency: f64,
+    value: f64,
+}
+
+impl Peak {
+    pub fn new(x: f64, y: f64, val: f64) -> Peak {
+        Self {
+            time: x,
+            frequency: y,
+            value: val,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -199,45 +217,94 @@ impl WaveApp {
     fn extract_peaks(
         &self,
         spec: &Spectrogram<LinearHz, Power>,
-    ) -> Result<Vec<f32>, anyhow::Error> {
-        tracing::info!("spectrogram shape: {:?}", spec.data().dim());
-        tracing::info!("axes: {:?}", spec.axes());
-        tracing::info!("bins: {:?}", spec.n_bins());
-        tracing::info!("frames: {:?}", spec.n_frames());
-        tracing::info!("freq range: {:?}", spec.frequency_range());
-        tracing::info!("db range: {:?}", spec.db_range());
-        tracing::info!("duration (s): {:?}", spec.duration());
-
-        let freq_bins = spec
+    ) -> Result<Vec<Peak>, anyhow::Error> {
+        let mut freq_bins = vec![];
+        let ordered_freq_map = spec
             .frequencies()
             .iter()
             .enumerate()
-            .map(|(i, x)| (i, x))
-            .collect::<HashMap<_, _>>();
+            .map(|(i, &x)| (i, x))
+            .collect::<Vec<(_, _)>>();
 
-        for col in spec.data().axis_iter(ndarray::Axis(1)) {
-            let mut max = 0.0;
-            for (idx, &val) in col.iter().enumerate() {
-                if val > max {
-                    max = val;
-                    tracing::info!(
-                        "freq: {:?}; val: {:?}",
-                        freq_bins.get(&idx).unwrap_or(&&0.0),
-                        max
-                    );
-                }
+        let map_len = ordered_freq_map.len();
+        let (_, ff) = spec.frequency_range();
+        let inc_freq = ff / 6.0;
+        let mut last_freq = 0.0;
+        let mut last_idx = 0;
+        for (idx, freq) in ordered_freq_map {
+            if (freq - last_freq) > inc_freq || idx == (map_len - 1) {
+                freq_bins.push((last_idx, idx));
+                last_idx = idx;
+                last_freq = freq;
             }
-            tracing::info!("max: {:?}\n", max);
         }
 
-        Ok(vec![])
+        let time_map = spec
+            .times()
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (i, x))
+            .collect::<HashMap<_, _>>();
+
+        let freq_map = spec
+            .frequencies()
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (i, x))
+            .collect::<HashMap<_, _>>();
+
+        let mut max_values: HashMap<(&usize, &usize), Vec<Peak>> =
+            HashMap::with_capacity(freq_bins.len());
+
+        let mut col_idx = 0 as usize;
+        for col in spec.data().axis_iter(ndarray::Axis(1)) {
+            let mut row_idx = 0;
+            for (idx0, idxf) in &freq_bins {
+                let mut max = 0.0;
+                for &val in col.slice(s![*idx0..*idxf]) {
+                    if val > max {
+                        max = val;
+                    }
+                }
+
+                let Some(&freq) = freq_map.get(&row_idx) else {
+                    return Err(anyhow!("Failed to retrieve frequency row idx"));
+                };
+
+                let Some(&time) = time_map.get(&col_idx) else {
+                    return Err(anyhow!("Failed to retrieve time col idx"));
+                };
+
+                let pk = Peak::new(time, freq, max);
+                if let Some(maxs) = max_values.get_mut(&(idx0, idxf)) {
+                    maxs.push(pk);
+                } else {
+                    max_values.insert((idx0, idxf), vec![pk]);
+                }
+
+                row_idx += 1;
+            }
+            col_idx += 1;
+        }
+
+        let mut peaks = vec![];
+        for ((_, _), maxs) in max_values.iter_mut() {
+            let sum = maxs.iter().map(|pk| pk.value).sum::<f64>();
+            let maxs_len = maxs.len() as f64;
+            let avg = sum / maxs_len;
+            maxs.retain(|x| x.value > avg);
+            peaks.extend_from_slice(maxs);
+        }
+
+        Ok(peaks)
     }
 
     fn search(&self) -> Result<(), anyhow::Error> {
         let mut signal = self.downsample()?;
         self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
         let spectrogram = self.spectrogram(signal)?;
-        let peaks = self.extract_peaks(&spectrogram);
+        let peaks = self.extract_peaks(&spectrogram)?;
+        tracing::info!("Peaks: {:?}", peaks);
         Ok(())
     }
 
