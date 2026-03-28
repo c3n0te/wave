@@ -83,11 +83,20 @@ impl WaveApp {
             .bounds([-0.5, 0.5])
             .labels(["-0.5", "0.0", "0.5"]);
 
-        let time_dataset = Dataset::default()
+        let mut time_dataset = Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Color::Green)
             .data(&time_data);
+
+        if self.record {
+            time_dataset = Dataset::default()
+                .name("Recording")
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Color::Green)
+                .data(&time_data);
+        }
 
         let time = Chart::new(vec![time_dataset])
             .x_axis(x_axis)
@@ -287,8 +296,8 @@ impl WaveApp {
     fn fingerprint(
         &self,
         peaks: &[Peak],
-        time_window: f64,
-        freq_window: f64,
+        time_zone: f64,
+        freq_zone: f64,
         min_targets: usize,
     ) -> Result<HashMap<u32, f64>, anyhow::Error> {
         let mut fingerprints = HashMap::new();
@@ -303,11 +312,11 @@ impl WaveApp {
                     return Err(anyhow!("Failed to unwrap peak option"));
                 };
 
-                if (anchor.time() - target.time()).abs() > time_window {
+                if (anchor.time() - target.time()).abs() > time_zone {
                     continue;
                 }
 
-                if (anchor.frequency() - target.frequency()).abs() > freq_window {
+                if (anchor.frequency() - target.frequency()).abs() > freq_zone {
                     continue;
                 }
 
