@@ -1,6 +1,6 @@
 use crate::wave::app::{Event, WaveApp};
 use crate::wave::log::initialize_logging;
-use crate::wave::utils::{get_audio, handle_input};
+use crate::wave::utils::{handle_input, stream_audio};
 use anyhow::anyhow;
 use std::sync::mpsc;
 use std::thread;
@@ -23,7 +23,7 @@ fn main() -> Result<(), anyhow::Error> {
     });
 
     thread::spawn(move || {
-        let Ok(_) = get_audio(event_tx, 15) else {
+        let Ok(_) = stream_audio(event_tx, 15) else {
             return Err(anyhow!("Failed to read audio input event"));
         };
 

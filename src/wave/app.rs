@@ -1,3 +1,4 @@
+use crate::wave::peak::Peak;
 use anyhow::anyhow;
 use cpal::SupportedStreamConfig;
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -26,23 +27,7 @@ pub enum Event {
     Config(SupportedStreamConfig),
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-struct Peak {
-    time: f64,
-    frequency: f64,
-    value: f64,
-}
-
-impl Peak {
-    pub fn new(x: f64, y: f64, val: f64) -> Peak {
-        Self {
-            time: x,
-            frequency: y,
-            value: val,
-        }
-    }
-}
-
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct WaveApp {
     exit: bool,
@@ -194,7 +179,7 @@ impl WaveApp {
         Ok(signal)
     }
 
-    fn bandpass(&self, signal: &mut Vec<f32>, low_cutoff: f64, high_cutoff: f64, q_factor: f64) {
+    fn bandpass(&self, signal: &mut [f32], low_cutoff: f64, high_cutoff: f64, q_factor: f64) {
         let mut filter = highpass_hz(low_cutoff, q_factor) >> lowpass_hz(high_cutoff, q_factor);
         filter.set_sample_rate(self.downsample_rate);
         signal
@@ -202,10 +187,10 @@ impl WaveApp {
             .for_each(|sample| *sample = filter.filter_mono(*sample));
     }
 
-    fn spectrogram(&self, signal: Vec<f32>) -> Result<Spectrogram<LinearHz, Power>, anyhow::Error> {
+    fn spectrogram(&self, signal: &[f32]) -> Result<Spectrogram<LinearHz, Power>, anyhow::Error> {
         let mut samples = non_empty_vec![0.0; nzu!(1)];
         for sample in signal {
-            samples.push(sample as f64);
+            samples.push(*sample as f64);
         }
 
         let stft = StftParams::new(nzu!(512), nzu!(256), WindowType::Hanning, true)?;
@@ -288,22 +273,74 @@ impl WaveApp {
 
         let mut peaks = vec![];
         for ((_, _), maxs) in max_values.iter_mut() {
-            let sum = maxs.iter().map(|pk| pk.value).sum::<f64>();
+            let sum = maxs.iter().map(|pk| pk.amplitude()).sum::<f64>();
             let maxs_len = maxs.len() as f64;
             let avg = sum / maxs_len;
-            maxs.retain(|pk| pk.value > avg);
+            maxs.retain(|pk| pk.amplitude() > avg);
             peaks.extend_from_slice(maxs);
         }
 
+        peaks.sort_by(|a, b| a.time().total_cmp(&b.time()));
         Ok(peaks)
+    }
+
+    fn fingerprint(
+        &self,
+        peaks: &[Peak],
+        time_window: f64,
+        freq_window: f64,
+        min_targets: usize,
+    ) -> Result<HashMap<u32, f64>, anyhow::Error> {
+        let mut fingerprints = HashMap::new();
+        for (idx, &anchor) in peaks.iter().enumerate() {
+            let mut targets = vec![];
+            for j in 0..peaks.len() {
+                if j == idx {
+                    continue;
+                }
+
+                let Some(&target) = peaks.get(j) else {
+                    return Err(anyhow!("Failed to unwrap peak option"));
+                };
+
+                if (anchor.time() - target.time()).abs() > time_window {
+                    continue;
+                }
+
+                if (anchor.frequency() - target.frequency()).abs() > freq_window {
+                    continue;
+                }
+
+                targets.push((anchor.distance(target), target));
+            }
+
+            targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let k_targets = std::cmp::min(min_targets, targets.len());
+            let target_slice = &targets[0..k_targets];
+            for (_, target) in target_slice {
+                let mut anchor_bits = (anchor.frequency() / 10.0).round() as u32;
+                let mut target_bits = (target.frequency() / 10.0).round() as u32;
+                let mut dt_bits = ((anchor.time() - target.time()) * 1000.0).abs().round() as u32;
+                anchor_bits = anchor_bits & ((1 << 10) - 1);
+                target_bits = target_bits & ((1 << 10) - 1);
+                dt_bits = dt_bits & ((1 << 12) - 1);
+                let hash = (anchor_bits << 22) | (target_bits << 12) | dt_bits;
+                fingerprints.insert(hash, anchor.time());
+            }
+        }
+
+        Ok(fingerprints)
     }
 
     fn search(&self) -> Result<(), anyhow::Error> {
         let mut signal = self.downsample()?;
         self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
-        let spectrogram = self.spectrogram(signal)?;
+        let spectrogram = self.spectrogram(&signal)?;
         let peaks = self.extract_peaks(&spectrogram)?;
-        tracing::info!("Peaks: {:?}", peaks);
+        let fingerprints = self.fingerprint(&peaks, 1.0, 1500.0, 8)?;
+        tracing::info!("duration: {:?}", spectrogram.duration());
+        tracing::info!("num fingerprints: {:?}", fingerprints.len());
+        tracing::info!("fingerprints: {:?}", fingerprints);
         Ok(())
     }
 
