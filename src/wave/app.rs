@@ -1,13 +1,10 @@
-use crate::wave::peak::Peak;
+use crate::wave::shazam::{bandpass, extract_peaks, fingerprint, spectrogram};
 use anyhow::anyhow;
 use cpal::SupportedStreamConfig;
 use crossterm::event::{KeyCode, KeyEventKind};
 use dasp::ring_buffer;
 use dasp_interpolate::sinc::Sinc;
 use dasp_signal::Signal;
-use fundsp::prelude::*;
-use ndarray::s;
-use non_empty_slice::non_empty_vec;
 use ratatui::symbols::Marker;
 use ratatui::{
     DefaultTerminal, Frame,
@@ -17,9 +14,8 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
 };
 use rustfft::{FftPlanner, num_complex::Complex};
-use spectrograms::{LinearHz, Power, Spectrogram, audio::*, nzu};
-use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 
 pub enum Event {
     Input(crossterm::event::KeyEvent),
@@ -28,27 +24,27 @@ pub enum Event {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WaveApp {
     exit: bool,
     config: Option<SupportedStreamConfig>,
-    db: rusqlite::Connection,
+    db: Arc<Mutex<rusqlite::Connection>>,
     raw_data: Vec<f32>,
     record: bool,
-    recorded_data: Vec<f32>,
+    recorded_data: Arc<Mutex<Vec<f32>>>,
     downsample_rate: f64,
 }
 
 impl WaveApp {
     pub fn new(path: &str, downsample_rate: f64) -> Result<WaveApp, anyhow::Error> {
-        let db = rusqlite::Connection::open(path)?;
+        let db = Arc::new(Mutex::new(rusqlite::Connection::open(path)?));
         Ok(Self {
             exit: false,
             config: None,
             db: db,
             raw_data: vec![],
             record: false,
-            recorded_data: vec![],
+            recorded_data: Arc::new(Mutex::new(vec![])),
             downsample_rate: downsample_rate,
         })
     }
@@ -161,195 +157,76 @@ impl WaveApp {
             .collect()
     }
 
-    fn record_data(&mut self) {
-        self.recorded_data.extend(self.raw_data.clone());
+    fn record_data(&mut self) -> Result<(), anyhow::Error> {
+        {
+            let Ok(mut data) = self.recorded_data.lock() else {
+                return Err(anyhow!("Failed to acquire recorded data mutex"));
+            };
+
+            data.extend(self.raw_data.clone());
+        }
+        Ok(())
     }
 
-    fn clear_recorded(&mut self) {
-        self.recorded_data.clear();
+    fn clear_recorded(&mut self) -> Result<(), anyhow::Error> {
+        {
+            let Ok(mut data) = self.recorded_data.lock() else {
+                return Err(anyhow!("Failed to acquire recorded data mutex"));
+            };
+
+            data.clear();
+        }
+        Ok(())
     }
 
-    fn downsample(&self) -> Result<Vec<f32>, anyhow::Error> {
+    fn downsample(&self, tx: mpsc::Sender<Vec<f32>>) -> Result<(), anyhow::Error> {
+        let recorded_data_clone = Arc::clone(&self.recorded_data);
+        let downsample_rate = self.downsample_rate.clone();
         let Some(cfg) = self.config.clone() else {
             tracing::error!("Failed to unwrap cpal device config");
             return Err(anyhow!("Failed to unwrap cpal device config"));
         };
 
-        let source = dasp_signal::from_iter(self.recorded_data.iter().map(|&x| x as f64));
-        let scale = self.downsample_rate / cfg.sample_rate() as f64;
-        let rbuf = ring_buffer::Fixed::from(vec![0.0; 70]);
-        let sinc = Sinc::new(rbuf);
-        let num_samples = (scale * self.recorded_data.len() as f64).round() as usize;
-        let signal = source
-            .scale_hz(sinc, scale)
-            .take(num_samples)
-            .map(|x| x as f32)
-            .collect::<Vec<_>>();
-        Ok(signal)
-    }
+        thread::spawn(move || {
+            let Ok(recorded_data) = recorded_data_clone.lock() else {
+                return Err(anyhow!("Failed to acquire recorded data mutex"));
+            };
 
-    fn bandpass(&self, signal: &mut [f32], low_cutoff: f64, high_cutoff: f64, q_factor: f64) {
-        let mut filter = highpass_hz(low_cutoff, q_factor) >> lowpass_hz(high_cutoff, q_factor);
-        filter.set_sample_rate(self.downsample_rate);
-        signal
-            .iter_mut()
-            .for_each(|sample| *sample = filter.filter_mono(*sample));
-    }
+            let source = dasp_signal::from_iter(recorded_data.iter().map(|&x| x as f64));
+            let scale = downsample_rate / cfg.sample_rate() as f64;
+            let rbuf = ring_buffer::Fixed::from(vec![0.0; 70]);
+            let sinc = Sinc::new(rbuf);
+            let num_samples = (scale * recorded_data.len() as f64).round() as usize;
+            let signal = source
+                .scale_hz(sinc, scale)
+                .take(num_samples)
+                .map(|x| x as f32)
+                .collect::<Vec<_>>();
 
-    fn spectrogram(&self, signal: &[f32]) -> Result<Spectrogram<LinearHz, Power>, anyhow::Error> {
-        let mut samples = non_empty_vec![0.0; nzu!(1)];
-        for sample in signal {
-            samples.push(*sample as f64);
-        }
+            tx.send(signal)?;
+            Ok(())
+        });
 
-        let stft = StftParams::new(nzu!(512), nzu!(256), WindowType::Hanning, true)?;
-        let params = SpectrogramParams::new(stft, self.downsample_rate)?;
-        let spec = LinearPowerSpectrogram::compute(&samples, &params, None)?;
-        Ok(spec)
-    }
-
-    fn extract_peaks(
-        &self,
-        spec: &Spectrogram<LinearHz, Power>,
-    ) -> Result<Vec<Peak>, anyhow::Error> {
-        let mut freq_bins = vec![];
-        let ordered_freq_map = spec
-            .frequencies()
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| (i, x))
-            .collect::<Vec<(_, _)>>();
-
-        let map_len = ordered_freq_map.len();
-        let (_, ff) = spec.frequency_range();
-        let inc_freq = ff / 6.0;
-        let mut last_freq = 0.0;
-        let mut last_idx = 0;
-        for (idx, freq) in ordered_freq_map {
-            if (freq - last_freq) > inc_freq || idx == (map_len - 1) {
-                freq_bins.push((last_idx, idx));
-                last_idx = idx;
-                last_freq = freq;
-            }
-        }
-
-        let time_map = spec
-            .times()
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| (i, x))
-            .collect::<HashMap<_, _>>();
-
-        let freq_map = spec
-            .frequencies()
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| (i, x))
-            .collect::<HashMap<_, _>>();
-
-        let mut max_values: HashMap<(&usize, &usize), Vec<Peak>> =
-            HashMap::with_capacity(freq_bins.len());
-
-        let mut col_idx = 0;
-        for col in spec.data().axis_iter(ndarray::Axis(1)) {
-            let mut row_idx = 0;
-            for (idx0, idxf) in &freq_bins {
-                let mut max = 0.0;
-                for (idx, &val) in col.slice(s![*idx0..*idxf]).iter().enumerate() {
-                    if val > max {
-                        max = val;
-                        row_idx = *idx0 + idx;
-                    }
-                }
-
-                let Some(&freq) = freq_map.get(&row_idx) else {
-                    return Err(anyhow!("Failed to retrieve frequency row idx"));
-                };
-
-                let Some(&time) = time_map.get(&col_idx) else {
-                    return Err(anyhow!("Failed to retrieve time col idx"));
-                };
-
-                let pk = Peak::new(time, freq, max);
-                if let Some(maxs) = max_values.get_mut(&(idx0, idxf)) {
-                    maxs.push(pk);
-                } else {
-                    max_values.insert((idx0, idxf), vec![pk]);
-                }
-            }
-            col_idx += 1;
-        }
-
-        let mut peaks = vec![];
-        for ((_, _), maxs) in max_values.iter_mut() {
-            let sum = maxs.iter().map(|pk| pk.amplitude()).sum::<f64>();
-            let maxs_len = maxs.len() as f64;
-            let avg = sum / maxs_len;
-            maxs.retain(|pk| pk.amplitude() > avg);
-            peaks.extend_from_slice(maxs);
-        }
-
-        peaks.sort_by(|a, b| a.time().total_cmp(&b.time()));
-        Ok(peaks)
-    }
-
-    fn fingerprint(
-        &self,
-        peaks: &[Peak],
-        time_zone: f64,
-        freq_zone: f64,
-        min_targets: usize,
-    ) -> Result<HashMap<u32, f64>, anyhow::Error> {
-        let mut fingerprints = HashMap::new();
-        for (idx, &anchor) in peaks.iter().enumerate() {
-            let mut targets = vec![];
-            for j in 0..peaks.len() {
-                if j == idx {
-                    continue;
-                }
-
-                let Some(&target) = peaks.get(j) else {
-                    return Err(anyhow!("Failed to unwrap peak option"));
-                };
-
-                if (anchor.time() - target.time()).abs() > time_zone {
-                    continue;
-                }
-
-                if (anchor.frequency() - target.frequency()).abs() > freq_zone {
-                    continue;
-                }
-
-                targets.push((anchor.distance(target), target));
-            }
-
-            targets.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let k_targets = std::cmp::min(min_targets, targets.len());
-            let target_slice = &targets[0..k_targets];
-            for (_, target) in target_slice {
-                let mut anchor_bits = (anchor.frequency() / 10.0).round() as u32;
-                let mut target_bits = (target.frequency() / 10.0).round() as u32;
-                let mut dt_bits = ((anchor.time() - target.time()) * 1000.0).abs().round() as u32;
-                anchor_bits = anchor_bits & ((1 << 10) - 1);
-                target_bits = target_bits & ((1 << 10) - 1);
-                dt_bits = dt_bits & ((1 << 12) - 1);
-                let hash = (anchor_bits << 22) | (target_bits << 12) | dt_bits;
-                fingerprints.insert(hash, anchor.time());
-            }
-        }
-
-        Ok(fingerprints)
+        Ok(())
     }
 
     fn search(&self) -> Result<(), anyhow::Error> {
-        let mut signal = self.downsample()?;
-        self.bandpass(&mut signal, 20.0, 20000.0, 1.0);
-        let spectrogram = self.spectrogram(&signal)?;
-        let peaks = self.extract_peaks(&spectrogram)?;
-        let fingerprints = self.fingerprint(&peaks, 1.0, 1500.0, 8)?;
-        tracing::info!("duration: {:?}", spectrogram.duration());
-        tracing::info!("num fingerprints: {:?}", fingerprints.len());
-        tracing::info!("fingerprints: {:?}", fingerprints);
+        let downsample_rate = self.downsample_rate.clone();
+        let (tx, rx) = mpsc::channel();
+        self.downsample(tx)?;
+
+        thread::spawn(move || -> Result<(), anyhow::Error> {
+            let mut signal = rx.recv()?;
+            bandpass(&mut signal, downsample_rate, 20.0, 20000.0, 1.0);
+            let spectrogram = spectrogram(&signal, downsample_rate)?;
+            let peaks = extract_peaks(&spectrogram)?;
+            let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 8)?;
+            tracing::info!("duration: {:?}", spectrogram.duration());
+            tracing::info!("num fingerprints: {:?}", fingerprints.len());
+            tracing::info!("fingerprints: {:?}", fingerprints);
+            Ok(())
+        });
+
         Ok(())
     }
 
@@ -369,7 +246,7 @@ impl WaveApp {
             terminal.draw(|frame| self.draw(frame))?;
 
             if self.record {
-                self.record_data();
+                self.record_data()?;
             }
         }
 
@@ -407,7 +284,7 @@ impl WaveApp {
         }
 
         if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('c') {
-            self.clear_recorded();
+            self.clear_recorded()?;
         }
 
         if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('s') {
