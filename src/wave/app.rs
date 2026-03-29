@@ -9,10 +9,12 @@ use ratatui::symbols::Marker;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Stylize},
+    style::{Color, Style, Stylize},
+    symbols,
     text::Line,
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Tabs},
 };
+use rusqlite::Connection;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -33,11 +35,13 @@ pub struct WaveApp {
     record: bool,
     recorded_data: Arc<Mutex<Vec<f32>>>,
     downsample_rate: f64,
+    search: bool,
+    selected_tab: usize,
 }
 
 impl WaveApp {
     pub fn new(path: &str, downsample_rate: f64) -> Result<WaveApp, anyhow::Error> {
-        let db = Arc::new(Mutex::new(rusqlite::Connection::open(path)?));
+        let db = Arc::new(Mutex::new(Connection::open(path)?));
         Ok(Self {
             exit: false,
             config: None,
@@ -46,89 +50,133 @@ impl WaveApp {
             record: false,
             recorded_data: Arc::new(Mutex::new(vec![])),
             downsample_rate: downsample_rate,
+            search: false,
+            selected_tab: 0,
         })
     }
 
-    fn draw(&self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(frame.area());
+    fn draw(&mut self, frame: &mut Frame) {
+        if self.selected_tab == 0 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(2),
+                    Constraint::Percentage(49),
+                    Constraint::Percentage(49),
+                ])
+                .split(frame.area());
 
-        let instructions = Line::from(vec![
-            " Record ".into(),
-            "<R>".blue().bold(),
-            " Clear Recorded Data ".into(),
-            "<C>".blue().bold(),
-            " Search ".into(),
-            "<S>".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ])
-        .centered();
+            let instructions = Line::from(vec![
+                " Change Tab ".into(),
+                "<T>".blue().bold(),
+                " Record ".into(),
+                "<R>".blue().bold(),
+                " Clear Recorded Data ".into(),
+                "<C>".blue().bold(),
+                " Search ".into(),
+                "<S>".blue().bold(),
+                " Quit ".into(),
+                "<Q> ".blue().bold(),
+            ])
+            .centered();
 
-        let time_data = self.time_series();
-        let time_data_len = time_data.len();
-        let x_axis = Axis::default()
-            .title("time".yellow())
-            .bounds([0.0, time_data_len as f64])
-            .labels(["0%", "50%", "100%"]);
+            let time_data = self.time_series();
+            let time_data_len = time_data.len();
+            let x_axis = Axis::default()
+                .title("time".yellow())
+                .bounds([0.0, time_data_len as f64])
+                .labels(["0%", "50%", "100%"]);
 
-        let y_axis = Axis::default()
-            .title("Amplitude".yellow())
-            .bounds([-0.5, 0.5])
-            .labels(["-0.5", "0.0", "0.5"]);
+            let y_axis = Axis::default()
+                .title("Amplitude".yellow())
+                .bounds([-0.5, 0.5])
+                .labels(["-0.5", "0.0", "0.5"]);
 
-        let mut time_dataset = Dataset::default()
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Color::Green)
-            .data(&time_data);
-
-        if self.record {
-            time_dataset = Dataset::default()
-                .name("🔴 Recording")
+            let mut time_dataset = Dataset::default()
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Color::Green)
                 .data(&time_data);
+
+            if self.record {
+                time_dataset = Dataset::default()
+                    .name("🔴 Recording")
+                    .marker(Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Color::Green)
+                    .data(&time_data);
+            }
+
+            let time = Chart::new(vec![time_dataset])
+                .x_axis(x_axis)
+                .y_axis(y_axis)
+                .block(Block::default().title("Waveform").borders(Borders::ALL));
+
+            let freq_data = self.fft_series();
+            let freq_data_len = freq_data.len();
+            let x_axis = Axis::default()
+                .title("Frequency (Hz)".yellow())
+                .bounds([0.0, freq_data_len as f64 / 2.0])
+                .labels(["0%", "50%", "100%"]);
+
+            let y_axis = Axis::default()
+                .title("Magnitude".yellow())
+                .bounds([0.0, 10.0])
+                .labels(["0", "5.0", "10.0"]);
+
+            let freq_dataset = Dataset::default()
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Color::Green)
+                .data(&freq_data);
+
+            let freq = Chart::new(vec![freq_dataset])
+                .x_axis(x_axis)
+                .y_axis(y_axis)
+                .block(
+                    Block::default()
+                        .title("FFT Spectrum")
+                        .title_bottom(instructions)
+                        .borders(Borders::ALL),
+                );
+
+            let tabs = Tabs::new(vec!["Audio Visualizer", "Search Results"])
+                .style(Color::White)
+                .highlight_style(Style::default().green().on_black().bold())
+                .select(self.selected_tab)
+                .divider(symbols::DOT)
+                .padding(" ", " ");
+
+            frame.render_widget(tabs, chunks[0]);
+            frame.render_widget(time, chunks[1]);
+            frame.render_widget(freq, chunks[2]);
+        } else if self.selected_tab == 1 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(2), Constraint::Percentage(98)])
+                .split(frame.area());
+
+            let items = [
+                ListItem::new("Song 1"),
+                ListItem::new("Song 2"),
+                ListItem::new("Song 3"),
+            ];
+
+            let list = List::new(items)
+                .block(Block::bordered().title("Search Results"))
+                .style(Style::new().white())
+                .highlight_style(Style::new().reversed());
+
+            let tabs = Tabs::new(vec!["Audio Visualizer", "Search Results"])
+                .style(Color::White)
+                .highlight_style(Style::default().green().on_black().bold())
+                .select(self.selected_tab)
+                .divider(symbols::DOT)
+                .padding(" ", " ");
+
+            frame.render_widget(tabs, chunks[0]);
+            frame.render_widget(list, chunks[1]);
         }
-
-        let time = Chart::new(vec![time_dataset])
-            .x_axis(x_axis)
-            .y_axis(y_axis)
-            .block(Block::default().title("Waveform").borders(Borders::ALL));
-
-        let freq_data = self.fft_series();
-        let freq_data_len = freq_data.len();
-        let x_axis = Axis::default()
-            .title("Frequency (Hz)".yellow())
-            .bounds([0.0, freq_data_len as f64 / 2.0])
-            .labels(["0%", "50%", "100%"]);
-
-        let y_axis = Axis::default()
-            .title("Magnitude".yellow())
-            .bounds([0.0, 10.0])
-            .labels(["0", "5.0", "10.0"]);
-
-        let freq_dataset = Dataset::default()
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Color::Green)
-            .data(&freq_data);
-
-        let freq = Chart::new(vec![freq_dataset])
-            .x_axis(x_axis)
-            .y_axis(y_axis)
-            .block(
-                Block::default()
-                    .title("FFT Spectrum")
-                    .title_bottom(instructions)
-                    .borders(Borders::ALL),
-            );
-
-        frame.render_widget(time, chunks[0]);
-        frame.render_widget(freq, chunks[1]);
     }
 
     fn time_series(&self) -> Vec<(f64, f64)> {
@@ -289,6 +337,18 @@ impl WaveApp {
 
         if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('s') {
             self.search()?;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && key_event.code == KeyCode::Char('t')
+            && self.selected_tab == 0
+        {
+            self.selected_tab = 1;
+        } else if key_event.kind == KeyEventKind::Press
+            && key_event.code == KeyCode::Char('t')
+            && self.selected_tab == 1
+        {
+            self.selected_tab = 0;
         }
 
         Ok(())
