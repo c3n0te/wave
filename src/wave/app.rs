@@ -87,7 +87,7 @@ impl WaveApp {
 
         if self.record {
             time_dataset = Dataset::default()
-                .name("Recording")
+                .name("🔴 Recording")
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Color::Green)
