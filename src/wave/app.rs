@@ -69,7 +69,7 @@ impl WaveApp {
             let instructions = Line::from(vec![
                 " Change Tab ".into(),
                 "<T>".blue().bold(),
-                " Record ".into(),
+                " Start/Stop Recording ".into(),
                 "<R>".blue().bold(),
                 " Clear Recorded Data ".into(),
                 "<C>".blue().bold(),
