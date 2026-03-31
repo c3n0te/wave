@@ -55,6 +55,40 @@ impl WaveApp {
         })
     }
 
+    pub fn migrate(&self) -> Result<(), anyhow::Error> {
+        let db_clone = Arc::clone(&self.db);
+        let fingerprints = r#"
+            CREATE TABLE IF NOT EXISTS Fingerprints (
+                song_id INTEGER PRIMARY KEY,
+                hash INTEGER,
+                anchor_time FLOAT
+            );
+        "#;
+
+        let songs = r#"
+            CREATE TABLE IF NOT EXISTS Songs (
+                song_id INTEGER PRIMARY KEY,
+                title TEXT,
+                artist TEXT,
+                album TEXT
+            );
+        "#;
+
+        thread::spawn(move || {
+            let Ok(conn) = db_clone.lock() else {
+                return Err(anyhow!("Failed to acquire db mutex"));
+            };
+
+            let mut fing_stmt = conn.prepare(fingerprints)?;
+            let mut song_stmt = conn.prepare(songs)?;
+            fing_stmt.execute([])?;
+            song_stmt.execute([])?;
+            Ok(())
+        });
+
+        Ok(())
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         if self.selected_tab == 0 {
             let chunks = Layout::default()
@@ -163,7 +197,7 @@ impl WaveApp {
             ];
 
             let list = List::new(items)
-                .block(Block::bordered().title("Search Results"))
+                .block(Block::bordered().title("Top Ranked Songs"))
                 .style(Style::new().white())
                 .highlight_style(Style::new().reversed());
 
@@ -268,7 +302,7 @@ impl WaveApp {
             bandpass(&mut signal, downsample_rate, 20.0, 20000.0, 1.0);
             let spectrogram = spectrogram(&signal, downsample_rate)?;
             let peaks = extract_peaks(&spectrogram)?;
-            let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 8)?;
+            let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
             tracing::info!("duration: {:?}", spectrogram.duration());
             tracing::info!("num fingerprints: {:?}", fingerprints.len());
             tracing::info!("fingerprints: {:?}", fingerprints);
