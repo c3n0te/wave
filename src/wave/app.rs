@@ -131,7 +131,7 @@ impl WaveApp {
                 let peaks = extract_peaks(&spectrogram)?;
                 let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
                 tracing::info!(
-                    "file: {:?}\nnum fingerprints: {:?}",
+                    "file: {:?}; num fingerprints: {:?}",
                     entry.path(),
                     fingerprints.len(),
                 );
