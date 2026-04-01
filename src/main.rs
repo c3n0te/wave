@@ -8,8 +8,10 @@ mod wave;
 
 fn main() -> Result<(), anyhow::Error> {
     initialize_logging()?;
+    let data_path = String::from(".\\data\\mono");
     let mut wave = WaveApp::new("wave.db", 16000.0)?;
     wave.migrate()?;
+    wave.init_db(data_path)?;
     let mut terminal = ratatui::init();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     let tx_clone = event_tx.clone();

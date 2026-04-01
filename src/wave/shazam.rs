@@ -1,10 +1,31 @@
 use crate::wave::peak::Peak;
 use anyhow::anyhow;
+use dasp::ring_buffer;
+use dasp_interpolate::sinc::Sinc;
+use dasp_signal::Signal;
 use fundsp::prelude::*;
 use ndarray::s;
 use non_empty_slice::non_empty_vec;
 use spectrograms::{LinearHz, Power, Spectrogram, audio::*, nzu};
 use std::collections::HashMap;
+
+pub fn downsample(
+    signal: &[f32],
+    downsample_rate: f64,
+    sample_rate: f64,
+) -> Result<Vec<f32>, anyhow::Error> {
+    let source = dasp_signal::from_iter(signal.iter().map(|&x| x as f64));
+    let scale = downsample_rate / sample_rate;
+    let rbuf = ring_buffer::Fixed::from(vec![0.0; 70]);
+    let sinc = Sinc::new(rbuf);
+    let num_samples = (scale * signal.len() as f64).round() as usize;
+    let downsampled_signal = source
+        .scale_hz(sinc, scale)
+        .take(num_samples)
+        .map(|x| x as f32)
+        .collect::<Vec<_>>();
+    Ok(downsampled_signal)
+}
 
 pub fn bandpass(
     signal: &mut [f32],

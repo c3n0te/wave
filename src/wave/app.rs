@@ -1,4 +1,4 @@
-use crate::wave::shazam::{bandpass, extract_peaks, fingerprint, spectrogram};
+use crate::wave::shazam::{bandpass, downsample, extract_peaks, fingerprint, spectrogram};
 use anyhow::anyhow;
 use cpal::SupportedStreamConfig;
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -14,10 +14,14 @@ use ratatui::{
     text::Line,
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Tabs},
 };
+use rodio::{Decoder, Source};
 use rusqlite::Connection;
 use rustfft::{FftPlanner, num_complex::Complex};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::{
+    fs::{File, read_dir},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+};
 
 pub enum Event {
     Input(crossterm::event::KeyEvent),
@@ -59,7 +63,7 @@ impl WaveApp {
         let db_clone = Arc::clone(&self.db);
         let fingerprints = r#"
             CREATE TABLE IF NOT EXISTS Fingerprints (
-                song_id INTEGER PRIMARY KEY,
+                song_id INTEGER,
                 hash INTEGER,
                 anchor_time FLOAT
             );
@@ -69,20 +73,115 @@ impl WaveApp {
             CREATE TABLE IF NOT EXISTS Songs (
                 song_id INTEGER PRIMARY KEY,
                 title TEXT,
-                artist TEXT,
-                album TEXT
+                artist TEXT
             );
         "#;
 
-        thread::spawn(move || {
-            let Ok(conn) = db_clone.lock() else {
-                return Err(anyhow!("Failed to acquire db mutex"));
-            };
+        let index = r#"
+            CREATE INDEX IF NOT EXISTS hash_idx ON Fingerprints (hash);
+        "#;
 
-            let mut fing_stmt = conn.prepare(fingerprints)?;
-            let mut song_stmt = conn.prepare(songs)?;
-            fing_stmt.execute([])?;
-            song_stmt.execute([])?;
+        let Ok(conn) = db_clone.lock() else {
+            tracing::info!("Failed to acquire db mutex");
+            return Err(anyhow!("Failed to acquire db mutex"));
+        };
+
+        let mut fing_stmt = conn.prepare(fingerprints)?;
+        let mut song_stmt = conn.prepare(songs)?;
+        fing_stmt.execute([])?;
+        song_stmt.execute([])?;
+        conn.execute(index, [])?;
+        Ok(())
+    }
+
+    pub fn init_db(&self, data_path: String) -> Result<(), anyhow::Error> {
+        let db_clone = Arc::clone(&self.db);
+
+        thread::spawn(move || {
+            {
+                let Ok(conn) = db_clone.lock() else {
+                    tracing::info!("Failed to acquire db mutex");
+                    return Err(anyhow!("Failed to acquire db mutex"));
+                };
+
+                let finger_count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM Fingerprints", [], |row| row.get(0))?;
+
+                let song_count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM Songs", [], |row| row.get(0))?;
+
+                if finger_count > 0 || song_count > 0 {
+                    return Ok(());
+                }
+            }
+
+            let downsample_rate = 16000.0;
+            let mut song_id = 0;
+            let files = read_dir(data_path)?;
+            for entry in files {
+                let entry = entry?;
+                let wav_file = File::open(entry.path())?;
+                let decoder = Decoder::new_wav(wav_file)?;
+                let sample_rate = decoder.sample_rate().get() as f64;
+                let recording = decoder.record();
+                let samples = recording.into_iter().collect::<Vec<f32>>();
+                let mut signal = downsample(&samples, downsample_rate, sample_rate)?;
+                bandpass(&mut signal, downsample_rate, 20.0, 20000.0, 1.0);
+                let spectrogram = spectrogram(&signal, downsample_rate)?;
+                let peaks = extract_peaks(&spectrogram)?;
+                let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
+                tracing::info!(
+                    "file: {:?}\nnum fingerprints: {:?}",
+                    entry.path(),
+                    fingerprints.len(),
+                );
+
+                let fpath = entry.path();
+                let Some(fname) = fpath.to_str() else {
+                    return Err(anyhow!("Failed to convert file name to str"));
+                };
+
+                let tokens = fname.split(" by ").collect::<Vec<&str>>();
+                let title = tokens[0].split("\\").collect::<Vec<&str>>();
+                let Some(title) = title.get(3) else {
+                    return Err(anyhow!("Failed to parse song title"));
+                };
+
+                let artist = tokens[1].split(".wav").collect::<Vec<&str>>();
+                let Some(artist) = artist.get(0) else {
+                    return Err(anyhow!("Failed to parse song artist"));
+                };
+
+                tracing::info!(
+                    "song id: {:?}; title: {:?}; artist: {:?}",
+                    song_id,
+                    title,
+                    artist
+                );
+
+                let Ok(mut conn) = db_clone.lock() else {
+                    return Err(anyhow!("Failed to acquire db mutex"));
+                };
+
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "INSERT INTO Songs (song_id, title, artist) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![song_id, title, artist],
+                )?;
+                tx.commit()?;
+
+                let tx = conn.transaction()?;
+                for (hash, anchor_time) in fingerprints {
+                    tx.execute(
+                        "INSERT INTO Fingerprints (song_id, hash, anchor_time) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![song_id, hash, anchor_time],
+                    )?;
+                }
+
+                tx.commit()?;
+                song_id += 1;
+            }
+
             Ok(())
         });
 
