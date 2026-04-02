@@ -308,12 +308,15 @@ impl WaveApp {
             };
 
             let mut items = vec![];
+            let mut rank = 1;
             for song in ranked_songs.iter() {
                 items.push(ListItem::new(format!(
-                    "Title: {:?}; Artist: {:?}",
+                    "{:?}. Title: {:?}; Artist: {:?}",
+                    rank,
                     song.title(),
                     song.artist()
                 )));
+                rank += 1;
             }
 
             let list = List::new(items)
@@ -491,7 +494,7 @@ impl WaveApp {
                     };
 
                     let Some(fprint2) = fprints.get(i + 1) else {
-                        return Err(anyhow!("Failed to retrieve fprint1"));
+                        return Err(anyhow!("Failed to retrieve fprint2"));
                     };
 
                     let Some(tk1) = fingerprints.get(&fprint1.hash()) else {
@@ -505,7 +508,7 @@ impl WaveApp {
                     let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
                     let tk = (tk2 - tk1).abs();
                     let dt = (tk_prime - tk).abs();
-                    if dt < 100.0 {
+                    if dt < 0.1 {
                         score += 1;
                     }
                 }
@@ -541,7 +544,7 @@ impl WaveApp {
 
             tracing::info!("Top Ranked Songs: {:?}", songs);
             let Ok(mut ranked_songs) = ranked_songs_clone.lock() else {
-                return Err(anyhow!("Failed to acquire recorded data mutex"));
+                return Err(anyhow!("Failed to acquire ranked songs mutex"));
             };
 
             ranked_songs.clear();
