@@ -1,4 +1,6 @@
+use crate::wave::fingerprint::Fingerprint;
 use crate::wave::shazam::{bandpass, downsample, extract_peaks, fingerprint, spectrogram};
+use crate::wave::song::Song;
 use anyhow::anyhow;
 use cpal::SupportedStreamConfig;
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -15,10 +17,13 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Tabs},
 };
 use rodio::{Decoder, Source};
-use rusqlite::Connection;
+use rusqlite::types::Value;
+use rusqlite::{Connection, vtab};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::{
+    collections::HashMap,
     fs::{File, read_dir},
+    rc::Rc,
     sync::{Arc, Mutex, mpsc},
     thread,
 };
@@ -41,11 +46,15 @@ pub struct WaveApp {
     downsample_rate: f64,
     search: bool,
     selected_tab: usize,
+    ranked_songs: Arc<Mutex<Vec<Song>>>,
 }
 
 impl WaveApp {
     pub fn new(path: &str, downsample_rate: f64) -> Result<WaveApp, anyhow::Error> {
-        let db = Arc::new(Mutex::new(Connection::open(path)?));
+        let conn = Connection::open(path)?;
+        vtab::array::load_module(&conn)?;
+        let db = Arc::new(Mutex::new(conn));
+
         Ok(Self {
             exit: false,
             config: None,
@@ -56,6 +65,7 @@ impl WaveApp {
             downsample_rate: downsample_rate,
             search: false,
             selected_tab: 0,
+            ranked_songs: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -82,7 +92,7 @@ impl WaveApp {
         "#;
 
         let Ok(conn) = db_clone.lock() else {
-            tracing::info!("Failed to acquire db mutex");
+            tracing::error!("Failed to acquire db mutex");
             return Err(anyhow!("Failed to acquire db mutex"));
         };
 
@@ -100,7 +110,7 @@ impl WaveApp {
         thread::spawn(move || {
             {
                 let Ok(conn) = db_clone.lock() else {
-                    tracing::info!("Failed to acquire db mutex");
+                    tracing::error!("Failed to acquire db mutex");
                     return Err(anyhow!("Failed to acquire db mutex"));
                 };
 
@@ -138,17 +148,20 @@ impl WaveApp {
 
                 let fpath = entry.path();
                 let Some(fname) = fpath.to_str() else {
+                    tracing::error!("Failed to convert file name to str");
                     return Err(anyhow!("Failed to convert file name to str"));
                 };
 
                 let tokens = fname.split(" by ").collect::<Vec<&str>>();
                 let title = tokens[0].split("\\").collect::<Vec<&str>>();
                 let Some(title) = title.get(3) else {
+                    tracing::error!("Failed to parse song title");
                     return Err(anyhow!("Failed to parse song title"));
                 };
 
                 let artist = tokens[1].split(".wav").collect::<Vec<&str>>();
                 let Some(artist) = artist.get(0) else {
+                    tracing::error!("Failed to parse song artist");
                     return Err(anyhow!("Failed to parse song artist"));
                 };
 
@@ -160,6 +173,7 @@ impl WaveApp {
                 );
 
                 let Ok(mut conn) = db_clone.lock() else {
+                    tracing::error!("Failed to acquire db mutex");
                     return Err(anyhow!("Failed to acquire db mutex"));
                 };
 
@@ -289,11 +303,18 @@ impl WaveApp {
                 .constraints([Constraint::Percentage(2), Constraint::Percentage(98)])
                 .split(frame.area());
 
-            let items = [
-                ListItem::new("Song 1"),
-                ListItem::new("Song 2"),
-                ListItem::new("Song 3"),
-            ];
+            let Ok(ranked_songs) = self.ranked_songs.lock() else {
+                panic!("Failed to acquire ranked songs lock");
+            };
+
+            let mut items = vec![];
+            for song in ranked_songs.iter() {
+                items.push(ListItem::new(format!(
+                    "Title: {:?}; Artist: {:?}",
+                    song.title(),
+                    song.artist()
+                )));
+            }
 
             let list = List::new(items)
                 .block(Block::bordered().title("Top Ranked Songs"))
@@ -392,6 +413,8 @@ impl WaveApp {
     }
 
     fn search(&self) -> Result<(), anyhow::Error> {
+        let db_clone = Arc::clone(&self.db);
+        let ranked_songs_clone = Arc::clone(&self.ranked_songs);
         let downsample_rate = self.downsample_rate.clone();
         let (tx, rx) = mpsc::channel();
         self.downsample(tx)?;
@@ -402,9 +425,127 @@ impl WaveApp {
             let spectrogram = spectrogram(&signal, downsample_rate)?;
             let peaks = extract_peaks(&spectrogram)?;
             let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
-            tracing::info!("duration: {:?}", spectrogram.duration());
-            tracing::info!("num fingerprints: {:?}", fingerprints.len());
-            tracing::info!("fingerprints: {:?}", fingerprints);
+            tracing::info!("recording duration: {:?}", spectrogram.duration());
+            tracing::info!("num recording fingerprints: {:?}", fingerprints.len());
+            let hashes = Rc::new(
+                fingerprints
+                    .keys()
+                    .map(|&x| x)
+                    .map(Value::from)
+                    .collect::<Vec<_>>(),
+            );
+
+            let Ok(conn) = db_clone.lock() else {
+                tracing::error!("Failed to acquire db mutex");
+                return Err(anyhow!("Failed to acquire db mutex"));
+            };
+
+            let mut stmt = conn.prepare(
+                "SELECT song_id, hash, anchor_time FROM Fingerprints WHERE hash in rarray(?1);",
+            )?;
+
+            let rows = stmt.query_map(&[&hashes], |row| {
+                Ok(Fingerprint::new(
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })?;
+
+            let mut matches: HashMap<i64, Vec<Fingerprint>> = HashMap::new();
+            for fprint in rows {
+                let fprint = fprint?;
+                if let Some(fprints) = matches.get_mut(&fprint.song_id()) {
+                    fprints.push(fprint);
+                } else {
+                    matches.insert(fprint.song_id(), vec![fprint]);
+                }
+            }
+
+            let matches_clone = matches.clone();
+            let mut ranked = matches_clone
+                .iter()
+                .map(|(id, fprints)| (id, fprints.len()))
+                .collect::<Vec<_>>();
+
+            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            let k_ranked = std::cmp::min(5, ranked.len());
+            let top_k = &ranked[0..k_ranked];
+            tracing::info!(
+                "top {:?} songs by id ranked by number of matching fingerprints in recording: {:?}",
+                k_ranked,
+                top_k
+            );
+
+            let mut time_coherence_scores = vec![];
+            for (song_id, _) in top_k {
+                let Some(fprints) = matches.get_mut(&song_id) else {
+                    return Err(anyhow!("Failed to unwrap song fingerprints"));
+                };
+
+                fprints.sort_by(|a, b| a.anchor_time().total_cmp(&b.anchor_time()));
+                let mut score = 0;
+                for i in 0..(fprints.len() - 1) {
+                    let Some(fprint1) = fprints.get(i) else {
+                        return Err(anyhow!("Failed to retrieve fprint1"));
+                    };
+
+                    let Some(fprint2) = fprints.get(i + 1) else {
+                        return Err(anyhow!("Failed to retrieve fprint1"));
+                    };
+
+                    let Some(tk1) = fingerprints.get(&fprint1.hash()) else {
+                        return Err(anyhow!("Failed to retrieve original matching hash"));
+                    };
+
+                    let Some(tk2) = fingerprints.get(&fprint2.hash()) else {
+                        return Err(anyhow!("Failed to retrieve original matching hash"));
+                    };
+
+                    let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
+                    let tk = (tk2 - tk1).abs();
+                    let dt = (tk_prime - tk).abs();
+                    if dt < 100.0 {
+                        score += 1;
+                    }
+                }
+
+                time_coherence_scores.push((song_id, score));
+            }
+
+            time_coherence_scores.sort_by(|a, b| b.1.cmp(&a.1));
+            tracing::info!(
+                "top songs by id ranked by time coherence scores: {:?}",
+                time_coherence_scores
+            );
+
+            let mut songs = vec![];
+            for (song_id, _) in time_coherence_scores {
+                let mut stmt = conn.prepare(
+                    "SELECT song_id, title, artist FROM Songs WHERE song_id=:song_id LIMIT 1;",
+                )?;
+
+                let rows = stmt.query_map(&[(":song_id", song_id)], |row| {
+                    Ok(Song::new(
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?;
+
+                for row in rows {
+                    let song = row?;
+                    songs.push(song);
+                }
+            }
+
+            tracing::info!("Top Ranked Songs: {:?}", songs);
+            let Ok(mut ranked_songs) = ranked_songs_clone.lock() else {
+                return Err(anyhow!("Failed to acquire recorded data mutex"));
+            };
+
+            ranked_songs.clear();
+            ranked_songs.extend_from_slice(&songs);
             Ok(())
         });
 

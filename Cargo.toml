@@ -18,7 +18,7 @@ ndarray = "0.17.2"
 non-empty-slice = "0.5.1"
 ratatui = "0.30.0"
 rodio = "0.22.2"
-rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.39.0", default-features = false, features = ["bundled", "vtab", "array"] }
 rustfft = "6.4.1"
 spectrograms = { version = "1.1.0", default-features = false, features = ["realfft"] }
 tracing = "0.1.44"
