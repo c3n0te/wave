@@ -106,6 +106,7 @@ impl WaveApp {
 
     pub fn init_db(&self, data_path: String) -> Result<(), anyhow::Error> {
         let db_clone = Arc::clone(&self.db);
+        let downsample_rate = self.downsample_rate.clone();
 
         thread::spawn(move || {
             {
@@ -125,7 +126,6 @@ impl WaveApp {
                 }
             }
 
-            let downsample_rate = 16000.0;
             let mut song_id = 0;
             let files = read_dir(data_path)?;
             for entry in files {
@@ -136,10 +136,10 @@ impl WaveApp {
                 let recording = decoder.record();
                 let samples = recording.into_iter().collect::<Vec<f32>>();
                 let mut signal = downsample(&samples, downsample_rate, sample_rate)?;
-                bandpass(&mut signal, downsample_rate, 20.0, 20000.0, 1.0);
+                bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
                 let spectrogram = spectrogram(&signal, downsample_rate)?;
                 let peaks = extract_peaks(&spectrogram)?;
-                let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
+                let fingerprints = fingerprint(&peaks, 0.5, 750.0, 8)?;
                 tracing::info!(
                     "file: {:?}; num fingerprints: {:?}",
                     entry.path(),
@@ -320,7 +320,7 @@ impl WaveApp {
             }
 
             let list = List::new(items)
-                .block(Block::bordered().title("Top Ranked Songs"))
+                .block(Block::bordered().title(" Top Ranked Songs "))
                 .style(Style::new().white())
                 .highlight_style(Style::new().reversed());
 
@@ -424,10 +424,10 @@ impl WaveApp {
 
         thread::spawn(move || -> Result<(), anyhow::Error> {
             let mut signal = rx.recv()?;
-            bandpass(&mut signal, downsample_rate, 20.0, 20000.0, 1.0);
+            bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
             let spectrogram = spectrogram(&signal, downsample_rate)?;
             let peaks = extract_peaks(&spectrogram)?;
-            let fingerprints = fingerprint(&peaks, 1.0, 1500.0, 5)?;
+            let fingerprints = fingerprint(&peaks, 0.5, 750.0, 8)?;
             tracing::info!("recording duration: {:?}", spectrogram.duration());
             tracing::info!("num recording fingerprints: {:?}", fingerprints.len());
             let hashes = Rc::new(
@@ -493,23 +493,25 @@ impl WaveApp {
                         return Err(anyhow!("Failed to retrieve fprint1"));
                     };
 
-                    let Some(fprint2) = fprints.get(i + 1) else {
-                        return Err(anyhow!("Failed to retrieve fprint2"));
-                    };
-
                     let Some(tk1) = fingerprints.get(&fprint1.hash()) else {
                         return Err(anyhow!("Failed to retrieve original matching hash"));
                     };
 
-                    let Some(tk2) = fingerprints.get(&fprint2.hash()) else {
-                        return Err(anyhow!("Failed to retrieve original matching hash"));
-                    };
+                    for j in i + 1..fprints.len() {
+                        let Some(fprint2) = fprints.get(j) else {
+                            return Err(anyhow!("Failed to retrieve fprint2"));
+                        };
 
-                    let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
-                    let tk = (tk2 - tk1).abs();
-                    let dt = (tk_prime - tk).abs();
-                    if dt < 0.1 {
-                        score += 1;
+                        let Some(tk2) = fingerprints.get(&fprint2.hash()) else {
+                            return Err(anyhow!("Failed to retrieve original matching hash"));
+                        };
+
+                        let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
+                        let tk = (tk2 - tk1).abs();
+                        let dt = (tk_prime - tk).abs();
+                        if dt < 0.1 {
+                            score += 1;
+                        }
                     }
                 }
 

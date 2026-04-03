@@ -173,7 +173,7 @@ pub fn fingerprint(
         for (_, target) in target_slice {
             let mut anchor_bits = (anchor.frequency() / 10.0).round() as u32;
             let mut target_bits = (target.frequency() / 10.0).round() as u32;
-            let mut dt_bits = ((anchor.time() - target.time()) * 1000.0).abs().round() as u32;
+            let mut dt_bits = ((target.time() - anchor.time()) * 1000.0).abs().round() as u32;
             anchor_bits = anchor_bits & ((1 << 10) - 1);
             target_bits = target_bits & ((1 << 10) - 1);
             dt_bits = dt_bits & ((1 << 12) - 1);
