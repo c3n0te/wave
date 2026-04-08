@@ -21,7 +21,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, vtab};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{File, read_dir},
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
@@ -138,8 +138,8 @@ impl WaveApp {
                 let mut signal = downsample(&samples, downsample_rate, sample_rate)?;
                 bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
                 let spectrogram = spectrogram(&signal, downsample_rate)?;
-                let peaks = extract_peaks(&spectrogram)?;
-                let fingerprints = fingerprint(&peaks, 0.5, 750.0, 8)?;
+                let peaks = extract_peaks(&spectrogram, 2.0)?;
+                let fingerprints = fingerprint(&peaks, 0.5, 333.33, 8)?;
                 tracing::info!(
                     "file: {:?}; num fingerprints: {:?}",
                     entry.path(),
@@ -426,8 +426,8 @@ impl WaveApp {
             let mut signal = rx.recv()?;
             bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
             let spectrogram = spectrogram(&signal, downsample_rate)?;
-            let peaks = extract_peaks(&spectrogram)?;
-            let fingerprints = fingerprint(&peaks, 0.5, 750.0, 8)?;
+            let peaks = extract_peaks(&spectrogram, 2.0)?;
+            let fingerprints = fingerprint(&peaks, 0.5, 333.33, 8)?;
             tracing::info!("recording duration: {:?}", spectrogram.duration());
             tracing::info!("num recording fingerprints: {:?}", fingerprints.len());
             let hashes = Rc::new(
@@ -472,7 +472,7 @@ impl WaveApp {
                 .collect::<Vec<_>>();
 
             ranked.sort_by(|a, b| b.1.cmp(&a.1));
-            let k_ranked = std::cmp::min(5, ranked.len());
+            let k_ranked = std::cmp::min(10, ranked.len());
             let top_k = &ranked[0..k_ranked];
             tracing::info!(
                 "top {:?} songs by id ranked by number of matching fingerprints in recording: {:?}",
@@ -487,8 +487,9 @@ impl WaveApp {
                 };
 
                 fprints.sort_by(|a, b| a.anchor_time().total_cmp(&b.anchor_time()));
-                let mut score = 0;
-                for i in 0..(fprints.len() - 1) {
+                let mut dts = vec![];
+
+                for i in 0..fprints.len() {
                     let Some(fprint1) = fprints.get(i) else {
                         return Err(anyhow!("Failed to retrieve fprint1"));
                     };
@@ -508,14 +509,31 @@ impl WaveApp {
 
                         let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
                         let tk = (tk2 - tk1).abs();
-                        let dt = (tk_prime - tk).abs();
-                        if dt < 0.1 {
-                            score += 1;
-                        }
+                        let dt = (tk_prime - tk).abs() * 1000.0;
+                        dts.push(dt);
                     }
                 }
 
-                time_coherence_scores.push((song_id, score));
+                let bin_size = 10.0;
+                let mut histogram = BTreeMap::new();
+                for &dt in &dts {
+                    let bin = (dt / bin_size).floor() as u64;
+                    histogram
+                        .entry(bin)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                }
+
+                let Some(max_bin) = histogram.iter().max_by_key(|&(_bin, count)| count) else {
+                    continue;
+                };
+
+                tracing::info!(
+                    "song id: {:?} histogram max (bin, count): {:?}",
+                    song_id,
+                    max_bin
+                );
+                time_coherence_scores.push((song_id, max_bin.1.clone()));
             }
 
             time_coherence_scores.sort_by(|a, b| b.1.cmp(&a.1));

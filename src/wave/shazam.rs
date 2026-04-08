@@ -56,7 +56,10 @@ pub fn spectrogram(
     Ok(spec)
 }
 
-pub fn extract_peaks(spec: &Spectrogram<LinearHz, Power>) -> Result<Vec<Peak>, anyhow::Error> {
+pub fn extract_peaks(
+    spec: &Spectrogram<LinearHz, Power>,
+    sigmas: f64,
+) -> Result<Vec<Peak>, anyhow::Error> {
     let mut freq_bins = vec![];
     let ordered_freq_map = spec
         .frequencies()
@@ -130,7 +133,12 @@ pub fn extract_peaks(spec: &Spectrogram<LinearHz, Power>) -> Result<Vec<Peak>, a
         let sum = maxs.iter().map(|pk| pk.amplitude()).sum::<f64>();
         let maxs_len = maxs.len() as f64;
         let avg = sum / maxs_len;
-        maxs.retain(|pk| pk.amplitude() > avg);
+        let squares = maxs
+            .iter()
+            .map(|pk| (pk.amplitude() - avg) * (pk.amplitude() - avg))
+            .sum::<f64>();
+        let std_dev = (squares / maxs_len).sqrt();
+        maxs.retain(|pk| pk.amplitude() > (avg + sigmas * std_dev));
         peaks.extend_from_slice(maxs);
     }
 
@@ -147,11 +155,7 @@ pub fn fingerprint(
     let mut fingerprints = HashMap::new();
     for (idx, &anchor) in peaks.iter().enumerate() {
         let mut targets = vec![];
-        for j in 0..peaks.len() {
-            if j == idx {
-                continue;
-            }
-
+        for j in idx + 1..peaks.len() {
             let Some(&target) = peaks.get(j) else {
                 return Err(anyhow!("Failed to unwrap peak option"));
             };
