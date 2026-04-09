@@ -50,7 +50,7 @@ pub fn spectrogram(
         samples.push(*sample as f64);
     }
 
-    let stft = StftParams::new(nzu!(512), nzu!(256), WindowType::Hanning, true)?;
+    let stft = StftParams::new(nzu!(1024), nzu!(32), WindowType::Hanning, true)?;
     let params = SpectrogramParams::new(stft, downsample_rate)?;
     let spec = LinearPowerSpectrogram::compute(&samples, &params, None)?;
     Ok(spec)
@@ -138,7 +138,7 @@ pub fn extract_peaks(
             .map(|pk| (pk.amplitude() - avg) * (pk.amplitude() - avg))
             .sum::<f64>();
         let std_dev = (squares / maxs_len).sqrt();
-        maxs.retain(|pk| pk.amplitude() > (avg + sigmas * std_dev));
+        maxs.retain(|pk| pk.amplitude() > (avg + (sigmas * std_dev)));
         peaks.extend_from_slice(maxs);
     }
 
