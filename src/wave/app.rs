@@ -138,7 +138,7 @@ impl WaveApp {
                 let mut signal = downsample(&samples, downsample_rate, sample_rate)?;
                 bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
                 let spectrogram = spectrogram(&signal, downsample_rate)?;
-                let peaks = extract_peaks(&spectrogram, 2.0)?;
+                let peaks = extract_peaks(&spectrogram, 3.0)?;
                 let fingerprints = fingerprint(&peaks, 0.5, 333.33, 8)?;
                 tracing::info!(
                     "file: {:?}; num fingerprints: {:?}",
@@ -426,7 +426,7 @@ impl WaveApp {
             let mut signal = rx.recv()?;
             bandpass(&mut signal, downsample_rate, 20.0, 8000.0, 1.0);
             let spectrogram = spectrogram(&signal, downsample_rate)?;
-            let peaks = extract_peaks(&spectrogram, 2.0)?;
+            let peaks = extract_peaks(&spectrogram, 3.0)?;
             let fingerprints = fingerprint(&peaks, 0.5, 333.33, 8)?;
             tracing::info!("recording duration: {:?}", spectrogram.duration());
             tracing::info!("num recording fingerprints: {:?}", fingerprints.len());
@@ -489,29 +489,15 @@ impl WaveApp {
                 fprints.sort_by(|a, b| a.anchor_time().total_cmp(&b.anchor_time()));
                 let mut dts = vec![];
 
-                for i in 0..fprints.len() {
-                    let Some(fprint1) = fprints.get(i) else {
-                        return Err(anyhow!("Failed to retrieve fprint1"));
-                    };
-
-                    let Some(tk1) = fingerprints.get(&fprint1.hash()) else {
+                for fprint in fprints {
+                    let Some(tk) = fingerprints.get(&fprint.hash()) else {
                         return Err(anyhow!("Failed to retrieve original matching hash"));
                     };
 
-                    for j in i + 1..fprints.len() {
-                        let Some(fprint2) = fprints.get(j) else {
-                            return Err(anyhow!("Failed to retrieve fprint2"));
-                        };
-
-                        let Some(tk2) = fingerprints.get(&fprint2.hash()) else {
-                            return Err(anyhow!("Failed to retrieve original matching hash"));
-                        };
-
-                        let tk_prime = (fprint2.anchor_time() - fprint1.anchor_time()).abs();
-                        let tk = (tk2 - tk1).abs();
-                        let dt = (tk_prime - tk).abs() * 1000.0;
-                        dts.push(dt);
-                    }
+                    let tk_prime = fprint.anchor_time().abs();
+                    let tk = tk.abs();
+                    let dt = (tk_prime - tk).abs();
+                    dts.push(dt);
                 }
 
                 let bin_size = 10.0;
